@@ -1,11 +1,13 @@
 """
 Chequea la diferencia entre:
-  - Comprar dolar oficial en Uala (proxy: DolarApi, casa "oficial", precio de venta)
-  - Vender dolares en Fiwind, producto "Dolar 24/7"
-    (fuente: pagina publica de InfoDolar, que refleja ese mismo precio)
+  - Comprar dolares en Uala ("Compras a" en comparadolar.ar/usd/uala)
+  - Vender dolares en Fiwind ("Vendes a" en comparadolar.ar/usd/fiwind-cripto)
 
-Si la ganancia porcentual supera el umbral (THRESHOLD_PCT), manda un mensaje
-por Telegram.
+Ambos precios se extraen del HTML publico de ComparaDolar.ar, que muestra
+datos en tiempo real (confirmados contra las apps reales de Uala y Fiwind).
+
+Si la ganancia en pesos por dolar supera el umbral (THRESHOLD_ARS), manda un
+mensaje por Telegram.
 
 Variables de entorno necesarias:
   TELEGRAM_BOT_TOKEN  -> token del bot (te lo da @BotFather)
@@ -20,81 +22,56 @@ import json
 import urllib.request
 import urllib.error
 
-DOLARAPI_OFICIAL_URL = "https://dolarapi.com/v1/dolares/oficial"
-INFODOLAR_FIWIND_URL = "https://www.infodolar.com/cotizacion-dolar-entidad-fiwind.aspx"
+UALA_URL = "https://comparadolar.ar/usd/uala"
+FIWIND_URL = "https://comparadolar.ar/usd/fiwind-cripto"
 TELEGRAM_API_TEMPLATE = "https://api.telegram.org/bot{token}/sendMessage"
 
-# Numeros con formato argentino: $ 1.504,80  o  $ 4,80
-MONEY_PATTERN = re.compile(r"\$\s*([\d]{1,3}(?:\.\d{3})*,\d{2})")
+# Numeros con formato argentino: 1.510,00 (despues de la etiqueta "Compras a" / "Vendes a")
+COMPRAS_PATTERN = re.compile(r"Compras a.{0,150}?([\d]{1,3}(?:\.\d{3})*,\d{2})", re.DOTALL)
+VENDES_PATTERN = re.compile(r"Vendes a.{0,150}?([\d]{1,3}(?:\.\d{3})*,\d{2})", re.DOTALL)
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    )
+}
 
 
 def parse_ar_number(text: str) -> float:
-    """Convierte '1.504,80' (formato argentino) a 1504.80 (float)."""
+    """Convierte '1.510,00' (formato argentino) a 1510.00 (float)."""
     return float(text.replace(".", "").replace(",", "."))
 
 
 def fetch_text(url: str) -> str:
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0 Safari/537.36"
-            )
-        },
-    )
+    req = urllib.request.Request(url, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=20) as resp:
         return resp.read().decode("utf-8", errors="ignore")
 
 
-def fetch_json(url: str) -> dict:
-    req = urllib.request.Request(url, headers={"User-Agent": "arbitraje-dolar-bot/1.0"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def get_uala_venta() -> float:
-    """Precio al que Uala te vende dolar oficial (lo que vos pagas)."""
-    data = fetch_json(DOLARAPI_OFICIAL_URL)
-    return float(data["venta"])
-
-
-def get_fiwind_compra() -> float:
-    """
-    Precio al que Fiwind te compra dolares en su producto 'Dolar 24/7'
-    (lo que vos recibis al vender). Se extrae del HTML de InfoDolar.
-
-    Estructura esperada en la fila de la tabla (en orden de aparicion):
-      1) precio de Compra
-      2) variacion en $ de Compra
-      3) precio de Venta
-      4) variacion en $ de Venta
-      5) precio de la columna "30%"
-      ... (variacion %, spread, etc.)
-    """
-    html = fetch_text(INFODOLAR_FIWIND_URL)
-
-    # Nos quedamos con el tramo que contiene la tabla de cotizacion,
-    # para no confundirnos con otros montos que pueda haber en la pagina.
-    marker_start = html.upper().find("COTIZACI")
-    marker_end = html.find("Puede ser de tu inter")
-    if marker_start == -1 or marker_end == -1 or marker_end <= marker_start:
+def get_uala_compra() -> float:
+    """Precio al que Uala te vende dolares (lo que vos pagas al comprar)."""
+    html = fetch_text(UALA_URL)
+    match = COMPRAS_PATTERN.search(html)
+    if not match:
         raise RuntimeError(
-            "No se pudo ubicar la tabla de cotizacion en el HTML de InfoDolar. "
-            "Puede que la pagina haya cambiado de estructura."
-        )
-    seccion = html[marker_start:marker_end]
-
-    montos = MONEY_PATTERN.findall(seccion)
-    if len(montos) < 3:
-        raise RuntimeError(
-            f"Se esperaban al menos 3 montos en la tabla y se encontraron {len(montos)}. "
+            "No se pudo encontrar el precio de 'Compras a' en la pagina de Uala. "
             "La pagina puede haber cambiado de estructura."
         )
+    return parse_ar_number(match.group(1))
 
-    precio_compra = parse_ar_number(montos[0])
-    return precio_compra
+
+def get_fiwind_venta() -> float:
+    """Precio al que Fiwind te compra dolares (lo que vos recibis al vender)."""
+    html = fetch_text(FIWIND_URL)
+    match = VENDES_PATTERN.search(html)
+    if not match:
+        raise RuntimeError(
+            "No se pudo encontrar el precio de 'Vendes a' en la pagina de Fiwind. "
+            "La pagina puede haber cambiado de estructura."
+        )
+    return parse_ar_number(match.group(1))
 
 
 def send_telegram_message(token: str, chat_id: str, text: str) -> None:
@@ -123,21 +100,21 @@ def main() -> None:
         print("Faltan TELEGRAM_BOT_TOKEN y/o TELEGRAM_CHAT_ID en las variables de entorno.", file=sys.stderr)
         sys.exit(1)
 
-    uala_venta = get_uala_venta()
-    fiwind_compra = get_fiwind_compra()
+    uala_compra = get_uala_compra()
+    fiwind_venta = get_fiwind_venta()
 
-    ganancia_ars_por_usd = fiwind_compra - uala_venta
-    ganancia_pct = (ganancia_ars_por_usd / uala_venta) * 100
+    ganancia_ars_por_usd = fiwind_venta - uala_compra
+    ganancia_pct = (ganancia_ars_por_usd / uala_compra) * 100
 
-    print(f"Uala (venta oficial):     {uala_venta:.2f} ARS/USD")
-    print(f"Fiwind (compra 24/7):     {fiwind_compra:.2f} ARS/USD")
-    print(f"Ganancia:                 {ganancia_ars_por_usd:.2f} ARS/USD ({ganancia_pct:.2f}%)")
+    print(f"Uala (comprás a):     {uala_compra:.2f} ARS/USD")
+    print(f"Fiwind (vendés a):    {fiwind_venta:.2f} ARS/USD")
+    print(f"Ganancia:             {ganancia_ars_por_usd:.2f} ARS/USD ({ganancia_pct:.2f}%)")
 
     if ganancia_ars_por_usd >= threshold_ars:
         mensaje = (
             f"🟢 <b>Oportunidad detectada</b>\n\n"
-            f"Comprar en Uala: <b>{uala_venta:.2f}</b> ARS/USD\n"
-            f"Vender en Fiwind: <b>{fiwind_compra:.2f}</b> ARS/USD\n"
+            f"Comprar en Uala: <b>{uala_compra:.2f}</b> ARS/USD\n"
+            f"Vender en Fiwind: <b>{fiwind_venta:.2f}</b> ARS/USD\n"
             f"Ganancia: <b>{ganancia_ars_por_usd:.2f} ARS por dolar ({ganancia_pct:.2f}%)</b>\n\n"
             f"(Umbral configurado: ${threshold_ars:.2f} por dolar)"
         )

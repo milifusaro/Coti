@@ -50,10 +50,26 @@ def fetch_text(url: str) -> str:
         return resp.read().decode("utf-8", errors="ignore")
 
 
+def strip_html_tags(html: str) -> str:
+    """Saca todas las etiquetas HTML y colapsa espacios, para que la
+    etiqueta ('Compras a') y el numero queden cerca en el texto plano."""
+    sin_tags = re.sub(r"<[^>]+>", " ", html)
+    return re.sub(r"\s+", " ", sin_tags)
+
+
+def solo_seccion_principal(texto_plano: str) -> str:
+    """Corta el texto antes de la lista 'Otras opciones para operar USD',
+    para no confundir el precio de la entidad principal con el de otro
+    proveedor listado mas abajo en la misma pagina."""
+    corte = texto_plano.find("Otras opciones")
+    return texto_plano if corte == -1 else texto_plano[:corte]
+
+
 def get_uala_compra() -> float:
     """Precio al que Uala te vende dolares (lo que vos pagas al comprar)."""
     html = fetch_text(UALA_URL)
-    match = COMPRAS_PATTERN.search(html)
+    seccion = solo_seccion_principal(strip_html_tags(html))
+    match = COMPRAS_PATTERN.search(seccion)
     if not match:
         raise RuntimeError(
             "No se pudo encontrar el precio de 'Compras a' en la pagina de Uala. "
@@ -65,7 +81,8 @@ def get_uala_compra() -> float:
 def get_fiwind_venta() -> float:
     """Precio al que Fiwind te compra dolares (lo que vos recibis al vender)."""
     html = fetch_text(FIWIND_URL)
-    match = VENDES_PATTERN.search(html)
+    seccion = solo_seccion_principal(strip_html_tags(html))
+    match = VENDES_PATTERN.search(seccion)
     if not match:
         raise RuntimeError(
             "No se pudo encontrar el precio de 'Vendes a' en la pagina de Fiwind. "

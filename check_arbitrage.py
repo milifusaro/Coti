@@ -1,18 +1,26 @@
 """
-Chequea la diferencia entre:
-  - Comprar dolares en Uala ("Compras a" en comparadolar.ar/usd/uala)
-  - Vender dolares en Fiwind ("Vendes a" en comparadolar.ar/usd/fiwind-cripto)
+Corre dos chequeos de arbitraje de dolares, usando datos en tiempo real de
+ComparaDolar.ar (que refleja los precios reales de cada entidad):
 
-Ambos precios se extraen del HTML publico de ComparaDolar.ar, que muestra
-datos en tiempo real (confirmados contra las apps reales de Uala y Fiwind).
+  Chequeo 1: Comprar en Uala vs Vender en Fiwind
+    - Compra: "Compras a" en comparadolar.ar/usd/uala
+    - Venta:  "Vendes a" en comparadolar.ar/usd/fiwind-cripto
+    - Avisa si la ganancia es >= THRESHOLD_ARS_1
 
-Si la ganancia en pesos por dolar supera el umbral (THRESHOLD_ARS), manda un
-mensaje por Telegram.
+  Chequeo 2: (Comprar en Supervielle - 10) vs Vender en Fiwind
+    - Compra: "Compras a" en comparadolar.ar/usd/banco-supervielle, menos $10
+    - Venta:  "Vendes a" en comparadolar.ar/usd/fiwind-cripto
+    - Avisa si la ganancia es >= THRESHOLD_ARS_2
+
+Cada chequeo que supera su umbral manda un mensaje de Telegram por separado,
+indicando de cuanto es la diferencia.
 
 Variables de entorno necesarias:
   TELEGRAM_BOT_TOKEN  -> token del bot (te lo da @BotFather)
   TELEGRAM_CHAT_ID    -> tu chat id (te lo da @userinfobot)
-  THRESHOLD_ARS       -> opcional, default 4.0 (ganancia minima en ARS por USD)
+  THRESHOLD_ARS_1     -> opcional, default 4.0 (umbral Uala vs Fiwind)
+  THRESHOLD_ARS_2     -> opcional, default 4.0 (umbral Supervielle-10 vs Fiwind)
+  AJUSTE_SUPERVIELLE  -> opcional, default 10.0 (se resta al precio de Supervielle)
 """
 
 import os
@@ -24,6 +32,7 @@ import urllib.error
 
 UALA_URL = "https://comparadolar.ar/usd/uala"
 FIWIND_URL = "https://comparadolar.ar/usd/fiwind-cripto"
+SUPERVIELLE_URL = "https://comparadolar.ar/usd/banco-supervielle"
 TELEGRAM_API_TEMPLATE = "https://api.telegram.org/bot{token}/sendMessage"
 
 # Numeros con formato argentino: 1.510,00 (despues de la etiqueta "Compras a" / "Vendes a")
@@ -65,30 +74,33 @@ def solo_seccion_principal(texto_plano: str) -> str:
     return texto_plano if corte == -1 else texto_plano[:corte]
 
 
-def get_uala_compra() -> float:
-    """Precio al que Uala te vende dolares (lo que vos pagas al comprar)."""
-    html = fetch_text(UALA_URL)
+def get_precio(url: str, patron: re.Pattern, etiqueta: str) -> float:
+    """Descarga una pagina de ComparaDolar.ar y extrae el precio principal
+    (compra o venta) segun el patron pasado."""
+    html = fetch_text(url)
     seccion = solo_seccion_principal(strip_html_tags(html))
-    match = COMPRAS_PATTERN.search(seccion)
+    match = patron.search(seccion)
     if not match:
         raise RuntimeError(
-            "No se pudo encontrar el precio de 'Compras a' en la pagina de Uala. "
+            f"No se pudo encontrar el precio de '{etiqueta}' en {url}. "
             "La pagina puede haber cambiado de estructura."
         )
     return parse_ar_number(match.group(1))
+
+
+def get_uala_compra() -> float:
+    """Precio al que Uala te vende dolares (lo que vos pagas al comprar)."""
+    return get_precio(UALA_URL, COMPRAS_PATTERN, "Compras a")
+
+
+def get_supervielle_compra() -> float:
+    """Precio al que Supervielle te vende dolares (lo que vos pagas al comprar)."""
+    return get_precio(SUPERVIELLE_URL, COMPRAS_PATTERN, "Compras a")
 
 
 def get_fiwind_venta() -> float:
     """Precio al que Fiwind te compra dolares (lo que vos recibis al vender)."""
-    html = fetch_text(FIWIND_URL)
-    seccion = solo_seccion_principal(strip_html_tags(html))
-    match = VENDES_PATTERN.search(seccion)
-    if not match:
-        raise RuntimeError(
-            "No se pudo encontrar el precio de 'Vendes a' en la pagina de Fiwind. "
-            "La pagina puede haber cambiado de estructura."
-        )
-    return parse_ar_number(match.group(1))
+    return get_precio(FIWIND_URL, VENDES_PATTERN, "Vendes a")
 
 
 def send_telegram_message(token: str, chat_id: str, text: str) -> None:
@@ -108,37 +120,81 @@ def send_telegram_message(token: str, chat_id: str, text: str) -> None:
         raise
 
 
-def main() -> None:
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    threshold_ars = float(os.environ.get("THRESHOLD_ARS", "4.0"))
+def chequear_y_avisar(
+    bot_token: str,
+    chat_id: str,
+    nombre_chequeo: str,
+    precio_compra: float,
+    precio_venta: float,
+    threshold_ars: float,
+    detalle_compra: str,
+    detalle_venta: str,
+) -> None:
+    """Calcula la diferencia entre un precio de compra y uno de venta,
+    imprime el resultado y manda un aviso a Telegram si supera el umbral."""
+    diferencia = precio_venta - precio_compra
+    diferencia_pct = (diferencia / precio_compra) * 100
 
-    if not bot_token or not chat_id:
-        print("Faltan TELEGRAM_BOT_TOKEN y/o TELEGRAM_CHAT_ID en las variables de entorno.", file=sys.stderr)
-        sys.exit(1)
+    print(f"--- {nombre_chequeo} ---")
+    print(f"{detalle_compra}: {precio_compra:.2f} ARS/USD")
+    print(f"{detalle_venta}: {precio_venta:.2f} ARS/USD")
+    print(f"Diferencia: {diferencia:.2f} ARS/USD ({diferencia_pct:.2f}%)")
 
-    uala_compra = get_uala_compra()
-    fiwind_venta = get_fiwind_venta()
-
-    ganancia_ars_por_usd = fiwind_venta - uala_compra
-    ganancia_pct = (ganancia_ars_por_usd / uala_compra) * 100
-
-    print(f"Uala (comprás a):     {uala_compra:.2f} ARS/USD")
-    print(f"Fiwind (vendés a):    {fiwind_venta:.2f} ARS/USD")
-    print(f"Ganancia:             {ganancia_ars_por_usd:.2f} ARS/USD ({ganancia_pct:.2f}%)")
-
-    if ganancia_ars_por_usd >= threshold_ars:
+    if diferencia >= threshold_ars:
         mensaje = (
-            f"🟢 <b>Oportunidad detectada</b>\n\n"
-            f"Comprar en Uala: <b>{uala_compra:.2f}</b> ARS/USD\n"
-            f"Vender en Fiwind: <b>{fiwind_venta:.2f}</b> ARS/USD\n"
-            f"Ganancia: <b>{ganancia_ars_por_usd:.2f} ARS por dolar ({ganancia_pct:.2f}%)</b>\n\n"
+            f"🟢 <b>Oportunidad detectada: {nombre_chequeo}</b>\n\n"
+            f"{detalle_compra}: <b>{precio_compra:.2f}</b> ARS/USD\n"
+            f"{detalle_venta}: <b>{precio_venta:.2f}</b> ARS/USD\n"
+            f"Diferencia: <b>{diferencia:.2f} ARS por dolar ({diferencia_pct:.2f}%)</b>\n\n"
             f"(Umbral configurado: ${threshold_ars:.2f} por dolar)"
         )
         send_telegram_message(bot_token, chat_id, mensaje)
         print("Notificacion enviada.")
     else:
         print("Diferencia por debajo del umbral, no se notifica.")
+    print()
+
+
+def main() -> None:
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    threshold_1 = float(os.environ.get("THRESHOLD_ARS_1", "4.0"))
+    threshold_2 = float(os.environ.get("THRESHOLD_ARS_2", "4.0"))
+    ajuste_supervielle = float(os.environ.get("AJUSTE_SUPERVIELLE", "10.0"))
+
+    if not bot_token or not chat_id:
+        print("Faltan TELEGRAM_BOT_TOKEN y/o TELEGRAM_CHAT_ID en las variables de entorno.", file=sys.stderr)
+        sys.exit(1)
+
+    # Se piden los tres precios una sola vez y se reusan en los dos chequeos.
+    uala_compra = get_uala_compra()
+    supervielle_compra = get_supervielle_compra()
+    fiwind_venta = get_fiwind_venta()
+
+    # --- Chequeo 1: Uala vs Fiwind ---
+    chequear_y_avisar(
+        bot_token,
+        chat_id,
+        nombre_chequeo="Uala vs Fiwind",
+        precio_compra=uala_compra,
+        precio_venta=fiwind_venta,
+        threshold_ars=threshold_1,
+        detalle_compra="Comprar en Uala",
+        detalle_venta="Vender en Fiwind",
+    )
+
+    # --- Chequeo 2: (Supervielle - ajuste) vs Fiwind ---
+    supervielle_ajustado = supervielle_compra - ajuste_supervielle
+    chequear_y_avisar(
+        bot_token,
+        chat_id,
+        nombre_chequeo="Supervielle vs Fiwind",
+        precio_compra=supervielle_ajustado,
+        precio_venta=fiwind_venta,
+        threshold_ars=threshold_2,
+        detalle_compra=f"Comprar en Supervielle ({supervielle_compra:.2f} - {ajuste_supervielle:.2f})",
+        detalle_venta="Vender en Fiwind",
+    )
 
 
 if __name__ == "__main__":

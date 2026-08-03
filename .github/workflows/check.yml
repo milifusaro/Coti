@@ -22,5 +22,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          THRESHOLD_ARS: "4.0"
+          THRESHOLD_ARS_1: "4.0"
+          THRESHOLD_ARS_2: "4.0"
+          AJUSTE_SUPERVIELLE: "10.0"
         run: python check_arbitrage.py

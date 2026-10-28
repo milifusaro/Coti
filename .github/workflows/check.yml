@@ -2,11 +2,12 @@ name: Chequear arbitraje dolar Uala/Fiwind
 
 on:
   schedule:
-    # Hora de Argentina (UTC-3): todos los dias de 7:00 a 23:00, cada 5 minutos.
+    # Hora de Argentina (UTC-3): todos los dias de 7:00 a 23:00.
     # GitHub usa UTC, por eso 07:00-23:00 ART = 10:00-02:00 UTC.
-    - cron: "*/5 10-23 * * *"   # 07:00 a 20:55 ART
-    - cron: "*/5 0-1 * * *"     # 21:00 a 22:55 ART
-    - cron: "0 2 * * *"         # 23:00 ART
+    # Minutos 3, 8, 13... para evitar los minutos mas congestionados de GitHub.
+    - cron: "3-58/5 10-23 * * *"   # 07:03 a 20:58 ART
+    - cron: "3-58/5 0-1 * * *"     # 21:03 a 22:58 ART
+    - cron: "3 2 * * *"            # 23:03 ART
   workflow_dispatch: {}
 
 jobs:
